@@ -1,26 +1,28 @@
 // This should match `NUM_PARTICLES` on the Rust side.
-const NUM_PARTICLES: u32 = 1500;
+const NUM_PARTICLES: u32 = 100000;
+
+const A: f32 = 0.95;
+const B: f32 = 0.7;
+const C: f32 = 0.6;
+const D: f32 = 3.5;
+const E: f32 = 0.25;
+const F: f32 = 0.1;
+
+const DT: f32 = 0.008;
 
 [[block]]
 struct Particle {
-  pos : vec2<f32>;
-  vel : vec2<f32>;
+  pos : vec4<f32>;
 };
 
 [[block]]
 struct SimParams {
   deltaT : f32;
-  rule1Distance : f32;
-  rule2Distance : f32;
-  rule3Distance : f32;
-  rule1Scale : f32;
-  rule2Scale : f32;
-  rule3Scale : f32;
 };
 
 [[block]]
 struct Particles {
-  particles : [[stride(16)]] array<Particle>;
+  particles: [[stride(16)]] array<Particle>;
 };
 
 [[group(0), binding(0)]] var<uniform> params : SimParams;
@@ -37,77 +39,39 @@ fn main() {
     return;
   }
 
-  var vPos : vec2<f32> = particlesSrc.particles[index].pos;
-  var vVel : vec2<f32> = particlesSrc.particles[index].vel;
+  // Increments calculation
+  // float dx = (a * (y - x))   * timestep;
+  // float dy = (x * (b-z) - y) * timestep;
+  // float dz = (x*y - c*z)     * timestep;
 
-  var cMass : vec2<f32> = vec2<f32>(0.0, 0.0);
-  var cVel : vec2<f32> = vec2<f32>(0.0, 0.0);
-  var colVel : vec2<f32> = vec2<f32>(0.0, 0.0);
-  var cMassCount : i32 = 0;
-  var cVelCount : i32 = 0;
 
-  var pos : vec2<f32>;
-  var vel : vec2<f32>;
-  var i : u32 = 0u;
-  loop {
-    if (i >= NUM_PARTICLES) {
-      break;
-    }
-    if (i == index) {
-      continue;
-    }
+  var vPos : vec4<f32> = particlesSrc.particles[index].pos;
+  var x0: f32 = vPos.x;
+  var y0: f32 = vPos.y;
+  var z0: f32 = vPos.z;
+  
+  // // Jake's
+  // vPos.x = sin(A * y0) + C * cos(A * x0);
+  // vPos.y = sin(B * x0) + D * cos(B * y0);
+  // vPos.z = sin(C * z0) + E * cos(C * z0);
 
-    pos = particlesSrc.particles[i].pos;
-    vel = particlesSrc.particles[i].vel;
+  // dx = ((z-b) * x - d*y) * timestep;
+  // dy = (d * x + (z-b) * y) *timestep;
+  // dz = (c + a*z - ((z*z*z) /3) - (x*x) + f * z * (x*x*x)) * timestep;
 
-    if (distance(pos, vPos) < params.rule1Distance) {
-      cMass = cMass + pos;
-      cMassCount = cMassCount + 1;
-    }
-    if (distance(pos, vPos) < params.rule2Distance) {
-      colVel = colVel - (pos - vPos);
-    }
-    if (distance(pos, vPos) < params.rule3Distance) {
-      cVel = cVel + vel;
-      cVelCount = cVelCount + 1;
-    }
+  var dx: f32 = ((z0 - B) * x0 - D*y0) * DT;
+  var dy: f32 = (D * x0 + (z0-B) * y0) * DT;
+  var dz: f32 = (C + A*z0 - ((z0*z0*z0) / 3.0) - (x0*x0) + F * z0 * (x0*x0*x0)) * DT;
 
-    continuing {
-      i = i + 1u;
-    }
-  }
-  if (cMassCount > 0) {
-    cMass = cMass * (1.0 / f32(cMassCount)) - vPos;
-  }
-  if (cVelCount > 0) {
-    cVel = cVel * (1.0 / f32(cVelCount));
-  }
+  // var dx: f32 = 0.01;
+  // var dy: f32 = 0.0;
+  // var dz: f32 = 0.0;
 
-  vVel = vVel + (cMass * params.rule1Scale) +
-      (colVel * params.rule2Scale) +
-      (cVel * params.rule3Scale);
-
-  // clamp velocity for a more pleasing simulation
-  vVel = normalize(vVel) * clamp(length(vVel), 0.0, 0.1);
-
-  // kinematic update
-  vPos = vPos + (vVel * params.deltaT);
-
-  // Wrap around boundary
-  if (vPos.x < -1.0) {
-    vPos.x = 1.0;
-  }
-  if (vPos.x > 1.0) {
-    vPos.x = -1.0;
-  }
-  if (vPos.y < -1.0) {
-    vPos.y = 1.0;
-  }
-  if (vPos.y > 1.0) {
-    vPos.y = -1.0;
-  }
+  // Aizawa
+  var new_x: f32 = vPos.x + dx;
+  var new_y: f32 = vPos.y + dy;
+  var new_z: f32 = vPos.z + dz;
 
   // Write back
-  particlesDst.particles[index].pos = vPos;
-  particlesDst.particles[index].vel = vVel;
+  particlesDst.particles[index].pos = vec4<f32>(new_x, new_y, new_z, 1.0);
 }

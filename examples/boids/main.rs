@@ -9,7 +9,7 @@ mod framework;
 
 // number of boid particles to simulate
 
-const NUM_PARTICLES: u32 = 1500;
+const NUM_PARTICLES: u32 = 100000;
 
 // number of single-particle calculations (invocations) in each gpu work group
 
@@ -20,6 +20,7 @@ struct Example {
     particle_bind_groups: Vec<wgpu::BindGroup>,
     particle_buffers: Vec<wgpu::Buffer>,
     vertices_buffer: wgpu::Buffer,
+    vertex_shader_bind_group: wgpu::BindGroup,
     compute_pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::RenderPipeline,
     work_group_count: u32,
@@ -47,6 +48,7 @@ impl framework::Example for Example {
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("compute.wgsl"))),
             flags,
         });
+
         let draw_shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("draw.wgsl"))),
@@ -57,19 +59,31 @@ impl framework::Example for Example {
 
         let sim_param_data = [
             0.04f32, // deltaT
-            0.1,     // rule1Distance
-            0.025,   // rule2Distance
-            0.025,   // rule3Distance
-            0.02,    // rule1Scale
-            0.05,    // rule2Scale
-            0.005,   // rule3Scale
         ]
         .to_vec();
+
+        let proj_data: cgmath::Matrix4<f32> =
+            cgmath::perspective(cgmath::Deg(90.0), 1.0, 0.01, 1000.0);
+        let look_at: cgmath::Matrix4<f32> = cgmath::Matrix4::look_at_rh(
+            cgmath::Point3::new(1.0, 1.0, 1.0) * 3.0,
+            cgmath::Point3::new(0.0, 0.0, 0.0),
+            cgmath::Vector3::new(0.0, 1.0, 0.0),
+        );
+        let cam_matrix = proj_data * look_at;
+        let cam_bytes: &[f32; 16] = &cam_matrix.as_ref();
+
         let sim_param_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Simulation Parameter Buffer"),
             contents: bytemuck::cast_slice(&sim_param_data),
             usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
         });
+
+        let vertex_shader_uniform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Vertex shader uniform buffer"),
+                contents: bytemuck::cast_slice(cam_bytes),
+                usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+            });
 
         // create compute bind layout group and compute pipeline layout
 
@@ -111,6 +125,22 @@ impl framework::Example for Example {
                 ],
                 label: None,
             });
+
+        let vertex_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(4 * 4 * 4),
+                    },
+                    count: None,
+                }],
+                label: None,
+            });
+
         let compute_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("compute"),
@@ -123,7 +153,7 @@ impl framework::Example for Example {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("render"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&vertex_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -137,12 +167,12 @@ impl framework::Example for Example {
                     wgpu::VertexBufferLayout {
                         array_stride: 4 * 4,
                         step_mode: wgpu::InputStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x4],
                     },
                     wgpu::VertexBufferLayout {
-                        array_stride: 2 * 4,
+                        array_stride: 3 * 4,
                         step_mode: wgpu::InputStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![2 => Float32x2],
+                        attributes: &wgpu::vertex_attr_array![1 => Float32x3],
                     },
                 ],
             },
@@ -166,23 +196,48 @@ impl framework::Example for Example {
         });
 
         // buffer for the three 2d triangle vertices of each instance
+        let vertex_buffer_data = [-0.01f32, -0.01, 0.0, 0.01, -0.01, 0.0, 0.00, 0.01, 0.0];
 
-        let vertex_buffer_data = [-0.01f32, -0.02, 0.01, -0.02, 0.00, 0.02];
         let vertices_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::bytes_of(&vertex_buffer_data),
             usage: wgpu::BufferUsage::VERTEX | wgpu::BufferUsage::COPY_DST,
         });
 
-        // buffer for all particles data of type [(posx,posy,velx,vely),...]
+        // buffer for all particles data of type [(posx,posy,posz),...]
 
         let mut initial_particle_data = vec![0.0f32; (4 * NUM_PARTICLES) as usize];
+
+        let mut x = 1.0f32;
+        let mut y = 1.0f32;
+        let mut z = 1.0f32;
+        let a = 1.7f32;
+        let b = 1.7f32;
+        let c = 0.6f32;
+        let d = 1.2f32;
+        let e = 0.8f32;
+
         for particle_instance_chunk in initial_particle_data.chunks_mut(4) {
+            // let x0 = x;
+            // let y0 = y;
+            // let z0 = z;
+
+            // x = (a * y0).sin() + c * (a * x0).cos();
+            // y = (b * x0).sin() + d * (b * y0).cos();
+            // z = (c * z0).sin() + e * (c * z0).cos();
+
+            // particle_instance_chunk[0] = x; // posx
+            // particle_instance_chunk[1] = y; // posy
+            // particle_instance_chunk[2] = z; // posz
+
             particle_instance_chunk[0] = 2.0 * (rand::random::<f32>() - 0.5); // posx
             particle_instance_chunk[1] = 2.0 * (rand::random::<f32>() - 0.5); // posy
-            particle_instance_chunk[2] = 2.0 * (rand::random::<f32>() - 0.5) * 0.1; // velx
-            particle_instance_chunk[3] = 2.0 * (rand::random::<f32>() - 0.5) * 0.1;
-            // vely
+            particle_instance_chunk[2] = 2.0 * (rand::random::<f32>() - 0.5); // posz
+            particle_instance_chunk[3] = 1.0;
+
+            // particle_instance_chunk[0] = rand::random::<f32>() + 0.0001; // posx
+            // particle_instance_chunk[1] = rand::random::<f32>() + 0.0001; // posy
+            // particle_instance_chunk[2] = rand::random::<f32>() + 0.0001; // posz
         }
 
         // creates two buffers of particle data each of size NUM_PARTICLES
@@ -226,6 +281,16 @@ impl framework::Example for Example {
             }));
         }
 
+        // Create the vertex shader bind group
+        let vertex_shader_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &vertex_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: vertex_shader_uniform_buffer.as_entire_binding(),
+            }],
+            label: None,
+        });
+
         // calculates number of work groups from PARTICLES_PER_GROUP constant
         let work_group_count =
             ((NUM_PARTICLES as f32) / (PARTICLES_PER_GROUP as f32)).ceil() as u32;
@@ -234,6 +299,7 @@ impl framework::Example for Example {
 
         Example {
             particle_bind_groups,
+            vertex_shader_bind_group,
             particle_buffers,
             vertices_buffer,
             compute_pipeline,
@@ -304,6 +370,7 @@ impl framework::Example for Example {
             rpass.set_pipeline(&self.render_pipeline);
             // render dst particles
             rpass.set_vertex_buffer(0, self.particle_buffers[(self.frame_num + 1) % 2].slice(..));
+            rpass.set_bind_group(0, &self.vertex_shader_bind_group, &[]);
             // the three instance-local vertices
             rpass.set_vertex_buffer(1, self.vertices_buffer.slice(..));
             rpass.draw(0..3, 0..NUM_PARTICLES);
